@@ -117,14 +117,15 @@ jobs:
               "$http_code" "$resolved_address"
 
             if [[ "$result_status" == "finished" &&
-                  "$tls_authorized" == "true" ]]; then
+                  "$tls_authorized" == "true" &&
+                  "$resolved_address" == "$VPS1_IP" ]]; then
               successful=$((successful + 1))
             fi
 
           done < <(jq -c '.results[]?' <<<"$result")
 
           echo
-          echo "Successful TLS probes: $successful / $total"
+          echo "Successful VPS1 probes: $successful / $total"
 
           if (( total < 3 )); then
             echo "ERROR: Fewer than 3 probes returned"
@@ -164,7 +165,8 @@ jobs:
           echo
           echo "Expected VPS1 IP: $VPS1_IP"
           echo "Standby VPS2 IP:   $VPS2_IP"
-                - name: Read Timeweb DNS record
+
+      - name: Read Timeweb DNS record
         shell: bash
         env:
           TIMEWEB_API_TOKEN: ${{ secrets.TIMEWEB_API_TOKEN }}
