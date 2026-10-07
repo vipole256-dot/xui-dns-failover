@@ -184,12 +184,36 @@ jobs:
           echo "Timeweb API: OK"
 
           echo
-          echo "=== DOMAINS ==="
+          echo "=== TOP LEVEL KEYS ==="
+          jq -r 'keys[]' <<<"$response"
 
+          echo
+          echo "=== DOMAINS COUNT ==="
+          jq -r '(.domains // []) | length' <<<"$response"
+
+          echo
+          echo "=== DOMAINS ==="
           jq -r '
-            .domains[]? |
+            (.domains // [])[] |
             {
               id: (.id // null),
-              fqdn: (.fqdn // .name // null)
+              fqdn: (.fqdn // .name // null),
+              linked_ip: (.linked_ip // null)
             }
+          ' <<<"$response"
+
+          echo
+          echo "=== RESPONSE STRUCTURE ==="
+          jq -c '
+            if (.domains? | type) == "array"
+            then {
+              domains_is_array: true,
+              domains_count: (.domains | length),
+              first_domain_keys: ((.domains[0] // {}) | keys)
+            }
+            else {
+              domains_is_array: false,
+              domains_type: (.domains? | type)
+            }
+            end
           ' <<<"$response"
