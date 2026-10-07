@@ -1,0 +1,166 @@
+name: External VPS1 check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vps1-external-check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check VPS1 from Globalping
+    runs-on: ubuntu-slim
+    timeout-minutes: 2
+
+    env:
+      TARGET: crm.po-vsemusvetu.ru
+      VPS1_IP: 5.178.3.27
+      VPS2_IP: 185.105.116.31
+
+    steps:
+      - name: Check VPS1 from Globalping
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          payload="$(jq -n \
+            --arg target "$TARGET" \
+            '{
+              target: $target,
+              type: "http",
+              locations: [
+                {"country": "DE", "limit": 1},
+                {"country": "NL", "limit": 1},
+                {"country": "US", "limit": 1},
+                {"country": "JP", "limit": 1},
+                {"country": "SG", "limit": 1}
+              ],
+              measurementOptions: {
+                protocol: "HTTPS",
+                port: 443,
+                request: {
+                  method: "GET"
+                }
+              }
+            }')"
+
+          echo "Creating Globalping measurement..."
+
+          response="$(curl -fsS \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data "$payload" \
+            https://api.globalping.io/v1/measurements)"
+
+          measurement_id="$(jq -r '.id // empty' <<<"$response")"
+
+          if [[ -z "$measurement_id" ]]; then
+            echo "ERROR: Globalping did not return a measurement ID"
+            echo "$response"
+            exit 1
+          fi
+
+          echo "Measurement ID: $measurement_id"
+
+          result=""
+
+          for attempt in {1..20}; do
+            result="$(curl -fsS \
+              "https://api.globalping.io/v1/measurements/$measurement_id")"
+
+            status="$(jq -r '.status // empty' <<<"$result")"
+
+            echo "Globalping status: $status"
+
+            if [[ "$status" != "in-progress" && -n "$status" ]]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          final_status="$(jq -r '.status // empty' <<<"$result")"
+
+          if [[ "$final_status" != "finished" ]]; then
+            echo "ERROR: Globalping measurement did not finish"
+            echo "$result"
+            exit 1
+          fi
+
+          total=0
+          successful=0
+
+          echo
+          echo "=== GLOBALPING RESULTS ==="
+
+          while IFS= read -r row; do
+            total=$((total + 1))
+
+            country="$(jq -r '.probe.country // "?"' <<<"$row")"
+            city="$(jq -r '.probe.city // "?"' <<<"$row")"
+            network="$(jq -r '.probe.network // "?"' <<<"$row")"
+
+            result_status="$(jq -r '.result.status // "?"' <<<"$row")"
+            tls_authorized="$(jq -r '.result.tls.authorized // false' <<<"$row")"
+            resolved_address="$(jq -r '.result.resolvedAddress // "?"' <<<"$row")"
+            http_code="$(jq -r '.result.statusCode // "?"' <<<"$row")"
+
+            printf '%-2s %-18s | %-28s | result=%-8s tls=%-5s http=%-4s addr=%s\n' \
+              "$country" "$city" "$network" \
+              "$result_status" "$tls_authorized" \
+              "$http_code" "$resolved_address"
+
+            if [[ "$result_status" == "finished" &&
+                  "$tls_authorized" == "true" ]]; then
+              successful=$((successful + 1))
+            fi
+
+          done < <(jq -c '.results[]?' <<<"$result")
+
+          echo
+          echo "Successful TLS probes: $successful / $total"
+
+          if (( total < 3 )); then
+            echo "ERROR: Fewer than 3 probes returned"
+            exit 1
+          fi
+
+          if (( successful < 3 )); then
+            echo "VPS1_EXTERNAL_STATUS=DOWN"
+            exit 1
+          fi
+
+          echo "VPS1_EXTERNAL_STATUS=UP"
+
+      - name: Check public DNS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo
+          echo "=== PUBLIC DNS ==="
+
+          cloudflare="$(curl -fsS \
+            -H 'accept: application/dns-json' \
+            "https://cloudflare-dns.com/dns-query?name=$TARGET&type=A")"
+
+          google="$(curl -fsS \
+            -H 'accept: application/dns-json' \
+            "https://dns.google/resolve?name=$TARGET&type=A")"
+
+          echo "Cloudflare DNS:"
+          jq -r '.Answer[]? | select(.type == 1) | .data' <<<"$cloudflare"
+
+          echo
+          echo "Google DNS:"
+          jq -r '.Answer[]? | select(.type == 1) | .data' <<<"$google"
+
+          echo
+          echo "Expected VPS1 IP: $VPS1_IP"
+          echo "Standby VPS2 IP:   $VPS2_IP"
